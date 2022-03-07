@@ -6,28 +6,36 @@ valid_path <-  "./data/valid"
 test_path <-  "./data/test"
 
 setwd("~/repos/R-project-tabular-data-version")
-# (neptune) create run
+# (neptune) create run that will store re-running metadata
 run <-  neptune_init(
   project="common-r/project-tabular-data-version",
-  tags=c("training", "reference"),
-  source_files=c("train.R")
+  tags=c("training", "from-reference"),
+  source_files=c("train.R", "re-training.R")
 )
 
-##########################
-# track data version     #
-##########################
+##########################################
+# Fetch data info from the reference run #
+##########################################
 
-# (neptune) track data version
-neptune_track_files(run["data/train"], train_path)
-neptune_track_files(run["data/valid"], valid_path)
-neptune_track_files(run["data/test"], test_path)
-neptune_wait(run)
+# (neptune) fetch project
+reference_run_df <- neptune_fetch_runs_table(project="common-r/project-tabular-data-version", 
+                                             tag="reference")
 
-# (neptune) prepare data
-neptune_download(run["data/train"], destination = "train")
-neptune_download(run["data/valid"], destination = "valid")
-neptune_download(run["data/test"], destination = "test")
-neptune_wait(run)
+
+reference_run_id <- tail(reference_run_df$`sys/id`, 1)
+
+# (neptune) resume reference run in the read-only mode
+reference_run <- neptune_init(
+  project="common-r/project-tabular-data-version",
+  run=reference_run_id,
+  mode="read-only"
+)
+
+# (neptune) download data logged to the reference run
+neptune_download(reference_run["data/train"], destination="train")
+neptune_download(reference_run["data/valid"], destination="valid")
+neptune_download(reference_run["data/test"], destination="test")
+neptune_wait(reference_run)
 
 X_train <-  readr::read_csv("./train/X.csv")
 y_train <-  readr::read_csv("./train/y.csv")
@@ -56,32 +64,51 @@ for(col in colnames(X_train)){
 library(lightgbm)
 
 # (neptune) log train sample
-neptune_upload(run["data/train_sample"], neptune_file_as_html(head(X_train, 20)))
+neptune_upload(run["data/train_sample"], neptune_file_as_html(head(X_train,20)))
+
+dtrain <- lgb.Dataset(data.matrix(X_train), label = y_train$x, categorical_feature = categorical_feature, colnames = colnames(X_train))
+dtest <- lgb.Dataset(data.matrix(X_test), label = y_test$x, reference=dtrain, colnames = colnames(X_train))
+dvalid <- lgb.Dataset(data.matrix(X_valid), label = y_valid$x, reference=dtrain, colnames = colnames(X_train))
+
+#######################################
+# Assign the same data version to run #
+#######################################
+
+neptune_assign(run["data/train"], neptune_fetch(reference_run["data/train"]))
+neptune_assign(run["data/valid"], neptune_fetch(reference_run["data/valid"]))
+neptune_assign(run["data/test"], neptune_fetch(reference_run["data/test"]))
+
+#######################################
+# Fetch params from the reference run #
+#######################################
+
+# Fetch the runs parameters
+reference_run_params <- neptune_fetch(reference_run["model_params"])
+neptune_wait(reference_run)
+
+# (neptune) close reference run
+neptune_stop(reference_run)
 
 ###########################
 # XGBoost: model training #
 ###########################
-dtrain <- lgb.Dataset(data.matrix(X_train), label = y_train$x, categorical_feature = categorical_feature, colnames = colnames(X_train))
-dtest <- lgb.Dataset(data.matrix(X_test), label = y_test$x, reference=dtrain, colnames = colnames(X_train))
-dvalid <- lgb.Dataset(data.matrix(X_valid), label = y_valid$x, reference=dtrain, colnames = colnames(X_train))
-# define parameters
-model_params <- list(
-  "eta"= 0.2974,
-  "max_depth"= 5,
-  "colsample_bytree"= 0.91,
-  "subsample"= 0.91,
-  "objective"= "regression"
-)
-run['model_params'] <- model_params
+
+evals <- list(train = dtrain, valid = dvalid)
+num_round <- 100
+
+
+# (neptune) pass neptune_callback to the train function and run training
+run['model_params'] <- reference_run_params
 valids <-  list(train=dtrain, valid=dvalid)
 num_round <-  100
 base_namespace <- "model_training"
 
-model <- lgb.train(params = model_params,
-          data = dtrain,
-          nrounds = num_round,
-          valids = valids,
-          eval=c('mae','rmse'))
+model <- lgb.train(params = reference_run_params,
+                   data = dtrain,
+                   nrounds = num_round,
+                   valids = valids,
+                   eval=c('mae','rmse'))
+
 png('importance.png')
 lgb.plot.importance(lgb.importance(model))
 dev.off()
@@ -103,3 +130,4 @@ run[paste0(base_namespace,"/test_score/rmse")] <- caret::RMSE(obs=y_test$x, pred
 run[paste0(base_namespace,"/test_score/mae")] <- caret::MAE(obs=y_test$x, pred=test_preds)
 neptune_sync(run, wait=T)
 neptune_stop(run)
+
