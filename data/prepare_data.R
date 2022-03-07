@@ -13,6 +13,9 @@ valid_set <- test_set[valid_idx, ]
 test_set <- test_set[-valid_idx, ]
 
 setwd("~/repos/R-project-tabular-data-version/data")
+dir.create('train')
+dir.create('valid')
+dir.create('test')
 write.csv(train_set[,-81],file = 'train/X.csv')
 write.csv(valid_set[,-81],file = 'valid/X.csv')
 write.csv(test_set[,-81],file = 'test/X.csv')
